@@ -1,0 +1,42 @@
+---
+devbox:
+  ca_file: "/Users/luanm/Downloads/global-bundle.pem"
+  ssh_pkey: "/Users/luanm/.ssh/id_rsa"
+  username: "luanm"
+  jumpbox: "devbox.performio.co"
+regions:
+  - remote_bind_address: "rds20.cfzd8p3h4rdv.ap-southeast-2.rds.amazonaws.com"
+    remote_bind_port: 3306
+    devbox_required: true
+    username: "luanm"
+    password: ""
+  - remote_bind_address: "rds24.cqwxv01prsck.us-west-1.rds.amazonaws.com"
+    remote_bind_port: 3306
+    devbox_required: true
+    username: "luanm"
+    password: ""
+  - remote_bind_address: "qa.c24wcnt1bk9g.ap-southeast-2.rds.amazonaws.com"
+    remote_bind_port: 3306
+    devbox_required: false
+    username: "luanm"
+    password: ""
+  - remote_bind_address: "qa-c-mysql8.c24wcnt1bk9g.ap-southeast-2.rds.amazonaws.com"
+    remote_bind_port: 3306
+    devbox_required: false
+    username: "luanm"
+    password: ""
+  - remote_bind_address: "rds40.ce8uhaxmlrvu.ap-southeast-2.rds.amazonaws.com"
+    remote_bind_port: 3306
+    devbox_required: false
+    username: "luanm"
+    password: ""
+  - remote_bind_address: "rds41.ce8uhaxmlrvu.ap-southeast-2.rds.amazonaws.com"
+    remote_bind_port: 3306
+    devbox_required: false
+    username: "luanm"
+    password: ""
+  - remote_bind_address: "rds50-global.cfz99lmxiyml.eu-central-1.rds.amazonaws.com"
+    remote_bind_port: 3306
+    devbox_required: false
+    username: "luanm"
+    password: ""
