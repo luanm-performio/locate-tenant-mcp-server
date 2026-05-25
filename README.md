@@ -1,80 +1,126 @@
 # Locate Tenant MCP Server
 
-An MCP (Model Context Protocol) server that helps locate tenants across multiple database regions and shards. It allows searching for a tenant's database server and schema name based on their hostname.
+Two MCP servers for locating and querying tenant databases across multiple AWS RDS regions, using Cloudflare WARP to switch virtual networks per region.
+
+## Servers
+
+| Server | File | Purpose |
+|---|---|---|
+| `locate-tenant` | `server.py` | Find which DB server/schema a tenant lives on by hostname |
+| `mysql-mcp-server` | `mysql_server.py` | Connect to a tenant DB and run SQL queries interactively |
 
 ## Features
 
-- **Tenant Discovery**: Quickly find where a tenant's data is stored.
-- **Multi-Region Support**: Searches across different configured database regions.
-- **SSH Tunneling**: Automatically handles connections to databases requiring a jumpbox (devbox) for access.
-- **FastMCP**: Built using the FastMCP framework for easy tool definition and execution.
+- **Tenant Discovery**: Search for a tenant's database server and schema by partial hostname.
+- **Multi-Region Support**: Queries all configured regions in parallel.
+- **Cloudflare WARP**: Switches WARP virtual networks per region automatically — no SSH jumpbox needed.
+- **Persistent Connections**: `mysql_server` caches DB connections by session key so the VPN switch only happens once.
+- **Schema Introspection**: List tables and describe columns so the LLM can write correct SQL.
+- **Safe Query Execution**: Destructive statements (DELETE, TRUNCATE, UPDATE, DROP, etc.) require explicit confirmation before running.
 
 ## Prerequisites
 
-- [uv](https://github.com/astral-sh/uv) installed on your system.
-- Access to the target databases (VPN might be required for some regions).
-- SSH access configured if using devbox-required regions.
+- [uv](https://github.com/astral-sh/uv) installed.
+- [Cloudflare WARP](https://one.one.one.one/) installed at `/Applications/Cloudflare WARP.app`.
+- WARP logged in and connected, with virtual networks configured for each region.
 
 ## Setup
 
-1.  **Clone the repository:**
-    ```bash
-    git clone <repository-url>
-    cd locate_tenant
-    ```
+1. **Clone the repository:**
+   ```bash
+   git clone <repository-url>
+   cd locate_tenant
+   ```
 
-2.  **Configure the server:**
-    Copy the example configuration and update it with your credentials and settings:
-    ```bash
-    cp config.yaml.example config.yaml
-    ```
-    Edit `config.yaml` to include your specific database endpoints, usernames, passwords, and devbox details.
+2. **Install dependencies:**
+   ```bash
+   uv sync
+   ```
 
-3.  **SSH Agent Setup (Crucial for Claude Desktop):**
-    For the SSH tunneling to work seamlessly within Claude Desktop, you need to create a stable symlink for your SSH auth socket:
-    ```bash
-    ln -sf "$SSH_AUTH_SOCK" "$HOME/.ssh/ssh-agent.sock"
-    ```
+3. **Configure:**
+   ```bash
+   cp config.yaml.example config.yaml
+   ```
+   Edit `config.yaml` with your DB credentials and WARP `virtual_network_id` for each region. Omit `virtual_network_id` for regions that don't require a VPN switch.
+
+## Configuration
+
+```yaml
+regions:
+  - remote_bind_address: "rds20.example.ap-southeast-2.rds.amazonaws.com"
+    remote_bind_port: 3306
+    username: "your_username"
+    password: "your_password"
+    virtual_network_id: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"  # WARP vnet ID; omit if not needed
+```
+
+Find your WARP virtual network IDs with:
+```bash
+/Applications/Cloudflare\ WARP.app/Contents/Resources/warp-cli vnet list
+```
 
 ## Claude Desktop Integration
 
-To use this server in Claude Desktop, add the following to your Claude configuration file (typically `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
+Add both servers to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
-    "locate-tenant-server": {
+    "locate-tenant": {
       "command": "uv",
       "args": [
-        "--directory", "/Users/<your_user_name>/../locate_tenant",
+        "--directory", "/path/to/locate_tenant",
         "run",
         "server.py"
-      ],
-      "env": {
-        "SSH_AUTH_SOCK": "/Users/<your_user_name>/.ssh/ssh-agent.sock"
-      }
+      ]
+    },
+    "mysql-mcp-server": {
+      "command": "uv",
+      "args": [
+        "--directory", "/path/to/locate_tenant",
+        "run",
+        "mysql_server.py"
+      ]
     }
   }
 }
 ```
 
-**Note:** Replace `/Users/<your_user_name>/../locate_tenant` with the actual path to your project directory.
-
 ## Usage
 
-Once integrated, Claude will have access to the `locate_tenant` tool. You can ask Claude:
+### Locate a tenant
 
-- "Find the database for the tenant 'acme'"
-- "Where is the 'performancecentre' tenant hosted?"
+> "Find the database for the tenant 'acme'"
 
-The tool returns a list of matching data sources, including the shard hosts, database server URL, schema name, and region.
+Claude calls `locate_tenant("acme")` and returns the shard hosts, DB server URL, schema name, and region for every match.
+
+### Query a tenant database
+
+> "Show me scheduled jobs with status RUNNING for acme"
+
+Claude will:
+1. Call `locate_tenant` to find the DB server and schema.
+2. Call `connect_to_database` — switches WARP to the right VNet and returns a `session_key`.
+3. Call `list_tables` and `describe_table` to understand the schema.
+4. Call `execute_query` with the appropriate SQL.
+
+For destructive queries (DELETE, UPDATE, TRUNCATE, DROP, etc.), Claude will ask for your confirmation before executing.
+
+### mysql_server tools
+
+| Tool | Description |
+|---|---|
+| `connect_to_database` | Opens a persistent connection; returns a `session_key` |
+| `list_tables` | Lists all tables in the connected schema |
+| `describe_table` | Shows column definitions for a table |
+| `execute_query` | Runs SQL; requires `confirm=true` for destructive statements |
+| `disconnect` | Closes a single session |
+| `disconnect_all` | Closes all open sessions |
 
 ## Development
 
-To run the server locally for testing:
-
 ```bash
-uv run server.py
+uv run python server.py          # run locate-tenant server via stdio
+uv run python mysql_server.py    # run mysql-mcp-server via stdio
+uv run mcp dev server.py         # run in MCP dev inspector
 ```
-
-This will start the server using the `stdio` transport, which is suitable for MCP communication.

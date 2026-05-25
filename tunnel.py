@@ -1,73 +1,45 @@
 import logging
-import socket
 import subprocess
 import time
-from dataclasses import dataclass
 
-from config import DevBox
+logging.basicConfig(level=logging.INFO)
+
+WARP_CLI = "/Applications/Cloudflare WARP.app/Contents/Resources/warp-cli"
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class LocalAddress:
-    """Local tunnel binding address."""
-
-    port: int
-    host: str = "127.0.0.1"
-
-    def __str__(self) -> str:
-        return f"{self.host}:{self.port}"
-
-
-def get_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        return s.getsockname()[1]
+def _warp_is_connected() -> bool:
+    result = subprocess.run(
+        [WARP_CLI, "status"],
+        capture_output=True,
+        text=True,
+    )
+    output = result.stdout
+    return "Connected" in output and "healthy" in output
 
 
-class SSHTunnel:
-    def __init__(self, dev_box: DevBox, remote_host: str, remote_port: int):
-        self.dev_box = dev_box
-        self.remote_host = remote_host
-        self.remote_port = remote_port
-        self.local_port = get_free_port()
-        self.proc = None
-
-    def start(self) -> LocalAddress:
-        if not self.dev_box:
-            raise ValueError("DevBox configuration is required to start SSH tunnel")
-
-        logger.info(
-            f"Starting SSH tunnel from {self.dev_box.username}@{self.dev_box.jumpbox}:22 to {self.remote_host}:{self.remote_port}"
+def switch_vnet(virtual_network_id: str, timeout: float = 30.0, interval: float = 1.0) -> None:
+    logger.info(f"Switching WARP virtual network to {virtual_network_id}")
+    result = subprocess.run(
+        [WARP_CLI, "vnet", virtual_network_id],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0 or "Success" not in result.stdout:
+        raise RuntimeError(
+            f"warp-cli vnet failed: {result.stderr.strip() or result.stdout.strip()}"
         )
 
-        self.proc = subprocess.Popen(
-            [
-                "ssh",
-                f"{self.dev_box.username}@{self.dev_box.jumpbox}",
-                "-L",
-                f"{self.local_port}:{self.remote_host}:{self.remote_port}",
-                "-N",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _warp_is_connected():
+            logger.info("WARP connected and healthy")
+            return
+        time.sleep(interval)
 
-        time.sleep(1)
+    raise RuntimeError(f"WARP did not reach Connected/healthy state within {timeout}s")
 
-        if self.proc.poll() is not None:
-            logger.error(self.proc.stderr.read())
-            raise RuntimeError("SSH failed")
 
-        return LocalAddress(self.local_port)
-
-    def stop(self) -> None:
-        logger.info("Stopping SSH tunnel")
-        if self.proc:
-            self.proc.terminate()
-            self.proc.wait()
-
-    def _is_alive(self) -> bool:
-        return self.proc is not None
+if __name__ == "__main__":
+    switch_vnet("d682d9f1-67b3-43c5-ac45-60cf50a5de46")

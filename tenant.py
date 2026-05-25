@@ -1,10 +1,11 @@
 from dataclasses import dataclass, fields
 
 from sqlalchemy import Engine, MetaData, Table, create_engine, select
+from sqlalchemy.pool import NullPool
 from typing_extensions import Any
 
 from config import Region, load_config
-from tunnel import SSHTunnel
+from tunnel import switch_vnet
 
 
 def map_to_dataclass(cls, row):
@@ -32,59 +33,19 @@ def construct_uri(data_source: DataSource) -> str:
     return f"mysql+pymysql://{data_source.username}:{data_source.password}@{data_source.database_server_url}/{data_source.schema_name}"
 
 
-class DevTunnel:
+class VPNTunnel:
     def __init__(self, data_source: DataSource, region: Region) -> None:
         self.data_source = data_source
         self.region = region
 
     def __enter__(self) -> Engine:
-        if self.region.devbox_required and self.region.devbox:
-            self.tunnel = SSHTunnel(
-                dev_box=self.region.devbox,
-                remote_host=self.region.remote_bind_address,
-                remote_port=self.region.remote_bind_port,
-            )
-
-            local_address = self.tunnel.start()
-            print(f"SSH tunnel established at {local_address}")
-
-            tunnel_data_source = DataSource(
-                database_server_url=f"{local_address.host}:{local_address.port}",
-                schema_name=self.data_source.schema_name,
-                username=self.data_source.username,
-                password=self.data_source.password,
-            )
-
-            self.engine = self._create_engine(
-                tunnel_data_source, self.region.devbox.ca_file
-            )
-        else:
-            self.engine = self._create_engine(self.data_source)
-
+        if self.region.virtual_network_id:
+            switch_vnet(self.region.virtual_network_id)
+        self.engine = create_engine(construct_uri(self.data_source), poolclass=NullPool)
         return self.engine
 
     def __exit__(self, exc_type: Any, exc_value: Any, exc_traceback: Any) -> None:
         self.engine.dispose()
-        if self.region.devbox_required:
-            self.tunnel.stop()
-
-    def _create_engine(
-        self, data_source: DataSource, ca_file: str | None = None
-    ) -> Engine:
-        tenant_uri = construct_uri(data_source)
-        if ca_file is None:
-            return create_engine(tenant_uri)
-
-        return create_engine(
-            tenant_uri,
-            connect_args={
-                "ssl": {
-                    "ca": ca_file,
-                    "check_hostname": False,
-                    "verify_server_cert": False,
-                }
-            },
-        )
 
 
 class Tenant:
@@ -100,7 +61,7 @@ class Tenant:
                 database_server_url=region.remote_bind_address,
                 schema_name="performancecentre_global",
             )
-            with DevTunnel(global_data_source, region) as engine:
+            with VPNTunnel(global_data_source, region) as engine:
                 try:
                     with engine.connect() as connection:
                         metadata = MetaData()
@@ -128,7 +89,7 @@ class Tenant:
                             data_sources += region_data_sources
                 except Exception:
                     print(
-                        f"Connection failed: {region.remote_bind_address}. Turn on VPN and try again. "
+                        f"Connection failed: {region.remote_bind_address}. Check VPN and try again."
                     )
 
         return data_sources
@@ -138,8 +99,7 @@ if __name__ == "__main__":
     tenant = Tenant()
     regions = load_config("config.yaml")
 
-    regs = [region for region in regions if region.devbox_required]
-    data_sources = tenant.find_by_host_name("amp", regs)
+    data_sources = tenant.find_by_host_name("amp", regions)
     for ds in data_sources:
         print(
             f"{ds.shard_hosts.split(',')[0]}\t{ds.schema_name}\t{ds.region.remote_bind_address}"
