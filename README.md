@@ -1,6 +1,6 @@
 # Locate Tenant MCP Server
 
-Two MCP servers for locating and querying tenant databases across multiple AWS RDS regions, using Cloudflare WARP to switch virtual networks per region.
+Two MCP servers for locating and querying tenant databases across multiple AWS RDS regions. Supports two tunnel modes per region: **Cloudflare WARP** virtual networks and **SSH jumpbox** tunnels.
 
 ## Servers
 
@@ -12,17 +12,18 @@ Two MCP servers for locating and querying tenant databases across multiple AWS R
 ## Features
 
 - **Tenant Discovery**: Search for a tenant's database server and schema by partial hostname.
-- **Multi-Region Support**: Queries all configured regions in parallel.
-- **Cloudflare WARP**: Switches WARP virtual networks per region automatically — no SSH jumpbox needed.
-- **Persistent Connections**: `mysql_server` caches DB connections by session key so the VPN switch only happens once.
+- **Multi-Region Support**: Queries all configured regions, skipping any that fail without aborting the rest.
+- **Cloudflare WARP**: Switches WARP virtual networks per region automatically. Skips the switch if already on the correct network. Retries transient IPC failures with exponential backoff.
+- **SSH Jumpbox**: Tunnels through an SSH jumpbox for regions that require it (`devbox_required: true`).
+- **Persistent Connections**: `mysql_server` caches DB connections by session key so the tunnel setup only happens once per session.
 - **Schema Introspection**: List tables and describe columns so the LLM can write correct SQL.
 - **Safe Query Execution**: Destructive statements (DELETE, TRUNCATE, UPDATE, DROP, etc.) require explicit confirmation before running.
 
 ## Prerequisites
 
 - [uv](https://github.com/astral-sh/uv) installed.
-- [Cloudflare WARP](https://one.one.one.one/) installed at `/Applications/Cloudflare WARP.app`.
-- WARP logged in and connected, with virtual networks configured for each region.
+- **For VPN regions**: [Cloudflare WARP](https://one.one.one.one/) installed at `/Applications/Cloudflare WARP.app`, logged in and connected, with virtual networks configured per region.
+- **For SSH regions**: SSH access to the jumpbox, with a private key and CA certificate for RDS SSL.
 
 ## Setup
 
@@ -46,17 +47,34 @@ Two MCP servers for locating and querying tenant databases across multiple AWS R
 ## Configuration
 
 ```yaml
+# Required for SSH-tunnel regions
+devbox:
+  ca_file: "/path/to/global-bundle.pem"
+  ssh_pkey: "/path/to/.ssh/id_rsa"
+  jumpbox: "jumpbox.example.com"
+  username: "your_username"
+
 regions:
-  - remote_bind_address: "rds20.example.ap-southeast-2.rds.amazonaws.com"
+  # WARP virtual network region
+  - name: "au-prod"
+    remote_bind_address: "rds20.example.ap-southeast-2.rds.amazonaws.com"
     remote_bind_port: 3306
-    username: "your_username"
-    password: "your_password"
-    virtual_network_id: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"  # WARP vnet ID; omit if not needed
+    username: "db_user"
+    password: "db_password"
+    virtual_network_id: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"  # omit if no VPN switch needed
+
+  # SSH jumpbox region
+  - name: "us-prod"
+    remote_bind_address: "rds10.example.us-east-1.rds.amazonaws.com"
+    remote_bind_port: 3306
+    username: "db_user"
+    password: "db_password"
+    devbox_required: true
 ```
 
 Find your WARP virtual network IDs with:
 ```bash
-/Applications/Cloudflare\ WARP.app/Contents/Resources/warp-cli vnet list
+/Applications/Cloudflare\ WARP.app/Contents/Resources/warp-cli vnet
 ```
 
 ## Claude Desktop Integration
