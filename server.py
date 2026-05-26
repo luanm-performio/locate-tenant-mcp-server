@@ -17,6 +17,7 @@ def _dataclass_to_dict(ds: DataSource) -> dict:
         "database_server_url": ds.database_server_url,
         "schema_name": ds.schema_name,
         "region": ds.region.remote_bind_address if ds.region else None,
+        "name": ds.name,
     }
 
 

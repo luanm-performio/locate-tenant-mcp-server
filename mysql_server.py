@@ -10,7 +10,7 @@ from pydantic import Field
 from sqlalchemy import Engine, text
 
 from config import load_config
-from tenant import DataSource, VPNTunnel
+from tenant import DataSource, Tunnel
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -19,8 +19,8 @@ logger.info("Server started")
 mcp = FastMCP("mysql-mcp-server")
 _config_path = Path(__file__).parent / "config.yaml"
 
-# Persistent session store: session_key -> (VPNTunnel, Engine)
-_sessions: dict[str, tuple[VPNTunnel, Engine]] = {}
+# Persistent session store: session_key -> (Tunnel, Engine)
+_sessions: dict[str, tuple[Tunnel, Engine]] = {}
 
 
 def _session_key(database_server_url: str, schema_name: str) -> str:
@@ -54,6 +54,12 @@ def connect_to_database(
     region: Annotated[
         str, Field(description="Region of the database server (e.g. 'us-east-1')")
     ],
+    name: Annotated[
+        str,
+        Field(
+            description="Optional name for the session (e.g. 'au-prod, us-prod'). If not provided, the session key will be used as the name."
+        ),
+    ],
 ) -> str:
     """Connect to the specified database and return the connection details."""
     key = _session_key(database_server_url, schema_name)
@@ -69,7 +75,9 @@ def connect_to_database(
             _sessions.pop(key)[0].__exit__(None, None, None)
 
     regions = load_config(str(_config_path))
-    matched_region = next((r for r in regions if r.remote_bind_address == region), None)
+    matched_region = next(
+        (r for r in regions if r.remote_bind_address == region or r.name == name), None
+    )
     if not matched_region:
         return f"Region {region} not found in config."
 
@@ -81,7 +89,7 @@ def connect_to_database(
         schema_name=schema_name,
     )
 
-    tunnel = VPNTunnel(tenant_data_source, custom_region)
+    tunnel = Tunnel(tenant_data_source, custom_region)
     try:
         engine = tunnel.__enter__()
         with engine.connect() as connection:
