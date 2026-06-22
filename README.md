@@ -16,6 +16,7 @@ Two MCP servers for locating and querying tenant databases across multiple AWS R
 - **Cloudflare WARP**: Switches WARP virtual networks per region automatically. Skips the switch if already on the correct network. Retries transient IPC failures with exponential backoff.
 - **SSH Jumpbox**: Tunnels through an SSH jumpbox for regions that require it (`devbox_required: true`).
 - **Persistent Connections**: `mysql_server` caches DB connections by session key so the tunnel setup only happens once per session.
+- **Idle Auto-Disconnect**: Sessions inactive beyond a configurable timeout (default 5 min) are automatically closed. The background reaper only runs while sessions are open — no overhead when idle.
 - **Schema Introspection**: List tables and describe columns so the LLM can write correct SQL.
 - **Safe Query Execution**: Destructive statements (DELETE, TRUNCATE, UPDATE, DROP, etc.) require explicit confirmation before running.
 
@@ -47,6 +48,10 @@ Two MCP servers for locating and querying tenant databases across multiple AWS R
 ## Configuration
 
 ```yaml
+# Optional global settings
+settings:
+  idle_timeout_minutes: 5  # auto-disconnect idle sessions; 0 = disabled
+
 # Required for SSH-tunnel regions
 devbox:
   ca_file: "/path/to/global-bundle.pem"
@@ -134,6 +139,8 @@ For destructive queries (DELETE, UPDATE, TRUNCATE, DROP, etc.), Claude will ask 
 | `execute_query` | Runs SQL; requires `confirm=true` for destructive statements |
 | `disconnect` | Closes a single session |
 | `disconnect_all` | Closes all open sessions |
+| `get_idle_timeout` | Returns the current idle timeout setting |
+| `set_idle_timeout` | Sets idle timeout in minutes (`0` = disabled) |
 
 ## Development
 

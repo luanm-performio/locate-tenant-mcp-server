@@ -4,6 +4,11 @@ import yaml
 
 
 @dataclass(frozen=True)
+class Settings:
+    idle_timeout_minutes: float = 5.0
+
+
+@dataclass(frozen=True)
 class DevBox:
     ca_file: str
     ssh_pkey: str
@@ -21,6 +26,15 @@ class Region:
     devbox: DevBox | None = None
     virtual_network_id: str | None = None
     name: str | None = None
+
+
+def load_settings(config_path: str) -> Settings:
+    with open(config_path, "r") as f:
+        config_dict = yaml.safe_load(f)
+    s = config_dict.get("settings", {})
+    return Settings(
+        idle_timeout_minutes=s.get("idle_timeout_minutes", 5.0),
+    )
 
 
 def load_config(config_path: str) -> list[Region]:

@@ -1,4 +1,7 @@
 ---
+settings:
+  idle_timeout_minutes: 5  # auto-disconnect idle sessions; 0 = disabled
+
 regions:
   - remote_bind_address: "rds20.cfzd8p3h4rdv.ap-southeast-2.rds.amazonaws.com"
     remote_bind_port: 3306
