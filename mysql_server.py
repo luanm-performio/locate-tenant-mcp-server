@@ -1,6 +1,8 @@
 import hashlib
 import logging
 import re
+import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Annotated
@@ -9,7 +11,7 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 from sqlalchemy import Engine, text
 
-from config import load_config
+from config import load_config, load_settings
 from tenant import DataSource, Tunnel
 
 logging.basicConfig(level=logging.INFO)
@@ -19,13 +21,49 @@ logger.info("Server started")
 mcp = FastMCP("mysql-mcp-server")
 _config_path = Path(__file__).parent / "config.yaml"
 
-# Persistent session store: session_key -> (Tunnel, Engine)
-_sessions: dict[str, tuple[Tunnel, Engine]] = {}
+# session_key -> (Tunnel, Engine, last_activity_monotonic)
+_sessions: dict[str, tuple[Tunnel, Engine, float]] = {}
+_sessions_lock = threading.Lock()
+
+# Set when _sessions is non-empty; reaper blocks on wait() when there is nothing to check.
+_session_event = threading.Event()
+
+# Loaded from config.yaml settings.idle_timeout_minutes; overridable at runtime via set_idle_timeout.
+try:
+    _idle_timeout: float = load_settings(str(_config_path)).idle_timeout_minutes * 60
+except Exception:
+    _idle_timeout = 300.0
 
 
 def _session_key(database_server_url: str, schema_name: str) -> str:
     raw = f"{database_server_url}|{schema_name}"
     return hashlib.md5(raw.encode()).hexdigest()[:8]
+
+
+def _reap_idle_sessions() -> None:
+    """Background daemon: disconnect sessions idle longer than _idle_timeout.
+
+    Blocks via _session_event when there are no active sessions so it consumes
+    no resources until a connection is established.
+    """
+    while True:
+        _session_event.wait()  # sleep until at least one session exists
+        time.sleep(60)
+        timeout = _idle_timeout
+        if timeout <= 0:
+            continue
+        now = time.monotonic()
+        with _sessions_lock:
+            expired = [k for k, (_, _, last) in _sessions.items() if now - last > timeout]
+            to_cleanup = [(k, _sessions.pop(k)[0]) for k in expired]
+            if not _sessions:
+                _session_event.clear()
+        for key, tunnel in to_cleanup:
+            logger.info("Auto-disconnecting idle session %s", key)
+            try:
+                tunnel.__exit__(None, None, None)
+            except Exception as e:
+                logger.warning("Error closing idle session %s: %s", key, e)
 
 
 @mcp.tool()
@@ -64,15 +102,26 @@ def connect_to_database(
     """Connect to the specified database and return the connection details."""
     key = _session_key(database_server_url, schema_name)
 
-    if key in _sessions:
-        _, engine = _sessions[key]
+    with _sessions_lock:
+        existing = _sessions.get(key)
+
+    if existing:
+        _, engine, _ = existing
         try:
             with engine.connect() as connection:
                 connection.execute(text("SELECT 1"))
+            with _sessions_lock:
+                if key in _sessions:
+                    _sessions[key] = (_sessions[key][0], engine, time.monotonic())
             return f"Reusing session {key}: {tenant_name} at {database_server_url}/{schema_name}."
         except Exception:
             # stale session — evict and reconnect
-            _sessions.pop(key)[0].__exit__(None, None, None)
+            with _sessions_lock:
+                entry = _sessions.pop(key, None)
+                if not _sessions:
+                    _session_event.clear()
+            if entry:
+                entry[0].__exit__(None, None, None)
 
     regions = load_config(str(_config_path))
     matched_region = next(
@@ -98,7 +147,9 @@ def connect_to_database(
         tunnel.__exit__(None, None, None)
         return f"Connection failed: {database_server_url}. Check VPN and try again. Error: {str(e)}"
 
-    _sessions[key] = (tunnel, engine)
+    with _sessions_lock:
+        _sessions[key] = (tunnel, engine, time.monotonic())
+    _session_event.set()
     return f"Connected session {key}: {tenant_name} at {database_server_url}/{schema_name}."
 
 
@@ -109,9 +160,12 @@ def disconnect(
     ],
 ) -> str:
     """Dispose of a single persisted database session."""
-    if session_key not in _sessions:
-        return f"Session {session_key} not found. Active sessions: {list(_sessions.keys())}"
-    tunnel, _ = _sessions.pop(session_key)
+    with _sessions_lock:
+        if session_key not in _sessions:
+            return f"Session {session_key} not found. Active sessions: {list(_sessions.keys())}"
+        tunnel, _, _ = _sessions.pop(session_key)
+        if not _sessions:
+            _session_event.clear()
     tunnel.__exit__(None, None, None)
     return f"Session {session_key} disconnected."
 
@@ -123,11 +177,14 @@ _DESTRUCTIVE_SQL = re.compile(
 
 
 def _get_engine(session_key: str) -> Engine:
-    if session_key not in _sessions:
-        raise KeyError(
-            f"Session {session_key} not found. Call connect_to_database first."
-        )
-    return _sessions[session_key][1]
+    with _sessions_lock:
+        if session_key not in _sessions:
+            raise KeyError(
+                f"Session {session_key} not found. Call connect_to_database first."
+            )
+        tunnel, engine, _ = _sessions[session_key]
+        _sessions[session_key] = (tunnel, engine, time.monotonic())
+        return engine
 
 
 @mcp.tool()
@@ -195,25 +252,43 @@ def execute_query(
 @mcp.tool()
 def disconnect_all() -> str:
     """Dispose of all persisted database sessions."""
-    keys = list(_sessions.keys())
-    for key in keys:
-        tunnel, _ = _sessions.pop(key)
+    with _sessions_lock:
+        keys = list(_sessions.keys())
+        to_cleanup = [(k, _sessions.pop(k)[0]) for k in keys]
+        _session_event.clear()
+    for _, tunnel in to_cleanup:
         tunnel.__exit__(None, None, None)
     return f"Disconnected {len(keys)} session(s): {keys}"
 
 
+@mcp.tool()
+def set_idle_timeout(
+    minutes: Annotated[
+        float,
+        Field(description="Idle timeout in minutes. Use 0 to disable auto-disconnect."),
+    ],
+) -> str:
+    """Set how long a session can be idle before it is automatically disconnected."""
+    global _idle_timeout
+    _idle_timeout = minutes * 60
+    if _idle_timeout <= 0:
+        return "Auto-disconnect disabled."
+    return f"Idle timeout set to {minutes:.1f} minute(s)."
+
+
+@mcp.tool()
+def get_idle_timeout() -> str:
+    """Return the current idle timeout setting."""
+    if _idle_timeout <= 0:
+        return "Auto-disconnect is disabled."
+    return f"Idle timeout is {_idle_timeout / 60:.1f} minute(s)."
+
+
 def main():
+    reaper = threading.Thread(target=_reap_idle_sessions, daemon=True)
+    reaper.start()
     mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":
     main()
-    # logger.info(
-    #     connect_to_database(
-    #         tenant_name="acme",
-    #         schema_name="dev2_amp_nz_250926",
-    #         environment="production",
-    #         database_server_url="qa-b.c24wcnt1bk9g.ap-southeast-2.rds.amazonaws.com",
-    #         region="qa.c24wcnt1bk9g.ap-southeast-2.rds.amazonaws.com",
-    #     )
-    # )
